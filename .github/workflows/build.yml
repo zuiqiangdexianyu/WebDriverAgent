@@ -1,0 +1,44 @@
+name: Build Un-signed WebDriverAgent App
+
+on:
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Select Xcode version
+      run: sudo xcode-select --switch /Applications/Xcode.app
+
+    # 编译项目，生成 .app 文件
+    - name: Build .app file
+      run: |
+        xcodebuild \
+          -project WebDriverAgent.xcodeproj \
+          -scheme WebDriverAgentRunner \
+          -sdk iphoneos \
+          -configuration Release \
+          -derivedDataPath ./DerivedData \
+          CODE_SIGN_IDENTITY="" \
+          CODE_SIGNING_REQUIRED=NO
+
+    - name: Prepare for Packaging
+      run: |
+        mkdir Payload
+        # 找到生成的 .app 文件并复制到 Payload 文件夹
+        APP_PATH=$(find ./DerivedData -name "*.app" -type d)
+        cp -r "$APP_PATH" Payload/
+
+    - name: Archive .app into .ipa
+      run: |
+        zip -r WebDriverAgent.ipa Payload
+
+    - name: Upload IPA as Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: WebDriverAgent-Unsigned.ipa
+        path: WebDriverAgent.ipa
