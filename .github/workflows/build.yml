@@ -1,44 +1,82 @@
-name: Build Un-signed WebDriverAgent App
+name: Build WebDriverAgent IPA (with self-signed cert)
 
 on:
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:   # 手动触发
 
 jobs:
   build:
     runs-on: macos-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Select Xcode version
-      run: sudo xcode-select --switch /Applications/Xcode.app
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_16.4.app
 
-    # 编译项目，生成 .app 文件
-    - name: Build .app file
-      run: |
-        xcodebuild \
-          -project WebDriverAgent.xcodeproj \
-          -scheme WebDriverAgentRunner \
-          -sdk iphoneos \
-          -configuration Release \
-          -derivedDataPath ./DerivedData \
-          CODE_SIGN_IDENTITY="" \
-          CODE_SIGNING_REQUIRED=NO
+      - name: Create temporary keychain and self-signed certificate
+        run: |
+          # 创建临时钥匙串
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
+          KEYCHAIN_PASSWORD="temp123"
 
-    - name: Prepare for Packaging
-      run: |
-        mkdir Payload
-        # 找到生成的 .app 文件并复制到 Payload 文件夹
-        APP_PATH=$(find ./DerivedData -name "*.app" -type d)
-        cp -r "$APP_PATH" Payload/
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security default-keychain -s "$KEYCHAIN_PATH"
 
-    - name: Archive .app into .ipa
-      run: |
-        zip -r WebDriverAgent.ipa Payload
+          # 生成自签名证书（用于代码签名）
+          CERT_DIR="$RUNNER_TEMP/certs"
+          mkdir -p "$CERT_DIR"
+          openssl req -new -newkey rsa:2048 -nodes \
+            -out "$CERT_DIR/cert.csr" \
+            -keyout "$CERT_DIR/key.pem" \
+            -subj "/CN=CI_Build/OU=CI/O=GitHub/C=US"
 
-    - name: Upload IPA as Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: WebDriverAgent-Unsigned.ipa
-        path: WebDriverAgent.ipa
+          openssl x509 -req -days 365 \
+            -in "$CERT_DIR/cert.csr" \
+            -signkey "$CERT_DIR/key.pem" \
+            -out "$CERT_DIR/cert.crt"
+
+          openssl pkcs12 -export \
+            -out "$CERT_DIR/cert.p12" \
+            -inkey "$CERT_DIR/key.pem" \
+            -in "$CERT_DIR/cert.crt" \
+            -passout pass:password
+
+          # 导入证书到钥匙串
+          security import "$CERT_DIR/cert.p12" \
+            -k "$KEYCHAIN_PATH" \
+            -P "password" \
+            -T /usr/bin/codesign
+
+          # 允许 codesign 访问该证书
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # 将证书标记为受信任（避免 UI 弹窗）
+          sudo security add-trusted-cert -d -r trustRoot -k "$KEYCHAIN_PATH" "$CERT_DIR/cert.crt"
+
+      - name: Build WebDriverAgentRunner with self-signed cert
+        run: |
+          xcodebuild build-for-testing \
+            -project WebDriverAgent.xcodeproj \
+            -scheme WebDriverAgentRunner \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath ./DerivedData \
+            CODE_SIGN_IDENTITY="CI_Build" \
+            CODE_SIGN_STYLE=Manual \
+            PROVISIONING_PROFILE_SPECIFIER=""
+
+      - name: Package .app to .ipa
+        run: |
+          mkdir Payload
+          APP_PATH=$(find ./DerivedData -name "*.app" -type d)
+          cp -r "$APP_PATH" Payload/
+          zip -r WebDriverAgent.ipa Payload
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WebDriverAgent.ipa
+          path: WebDriverAgent.ipa
